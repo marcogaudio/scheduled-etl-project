@@ -1,0 +1,30 @@
+# Goal: one single place decides what the pipeline fetches and where it writes. No other file contains hard-coded repo names, paths or secrets.
+# config/config.toml
+
+[github]
+# Single repositories to track, written as "owner/name".
+repos = [
+    "pola-rs/polars",
+    "duckdb/duckdb",
+    "dlt-hub/dlt",
+    "ranaroussi/yfinance",
+    "microsoft/qlib",
+    "freqtrade/freqtrade",
+]
+# Every public repo of these organisations / users is fetched too.
+# Careful: large organisations have hundreds of repos (= many API calls).
+orgs = []
+users = []
+# Items per page for paginated endpoints (GitHub's maximum is 100).
+per_page = 100
+
+[transform]
+# Repos not pushed to within this many days are dropped as "inactive".
+active_max_days_since_push = 365
+
+[load]
+# DuckDB database file. Relative paths start from the project root.
+db_path = "data/output.duckdb"
+# "append":    add today's snapshot and keep history (re-running today replaces only today).
+# "overwrite": replace the whole table with today's data.
+mode = "append"
