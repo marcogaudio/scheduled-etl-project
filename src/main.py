@@ -30,6 +30,9 @@ from src.config import DEFAULT_CONFIG_PATH, VALID_LOAD_MODES, Settings, load_set
 from src.extract import fetch_repos, save_raw
 from src.load import load
 from src.transform import transform
+from dlt_pipeline.pipeline import extract_with_dlt, load_with_dlt
+
+ENGINES = ["manual", "dlt"]
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
         settings = apply_cli_overrides(load_settings(args.config), args)
         # ONE timestamp for the whole run: every step measures from the same "now".
         as_of = datetime.now(timezone.utc)
-        summary = run(settings, as_of, dry_run=args.dry_run)
+        summary = run(settings, as_of, dry_run=args.dry_run, engine=args.engine)
     except Exception:
         # The only place that catches every error: log it with its full
         # traceback, then report failure through the exit code.
@@ -121,10 +124,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Extract and transform, but do not write to the database.",
     )
     parser.add_argument(
-        "--log-level",
-        choices=LOG_LEVELS,
-        default="INFO",
-        help="How much detail to log (default: INFO).",
+        "--engine",
+        choices=ENGINES,
+        default="manual",
+        help="manual = hand-written extract/load (Phases 2 and 5); dlt = dlt version (Phase 7).",
     )
     return parser.parse_args(argv)
 
@@ -153,13 +156,14 @@ def apply_cli_overrides(settings: Settings, args: argparse.Namespace) -> Setting
     return settings
 
 
-def run(settings: Settings, as_of: datetime, dry_run: bool = False) -> RunSummary:
-    """Execute extract -> transform -> load once.
+def run(settings: Settings, as_of: datetime, dry_run: bool = False, engine: str = "manual") -> RunSummary:
+    """Execute extract -> transform -> load once, with the chosen engine.
 
     Args:
         settings: Validated settings.
         as_of: Timestamp of this run (UTC), passed to every step.
         dry_run: If True, skip the load step: nothing is written to DuckDB.
+        engine: "manual" (Phases 2 + 5) or "dlt" (Phase 7). The transform is shared.
 
     Returns:
         A RunSummary with the row counts and the duration.
@@ -170,23 +174,24 @@ def run(settings: Settings, as_of: datetime, dry_run: bool = False) -> RunSummar
     """
     start = time.perf_counter()
 
-    with timed("extract"):
-        raw = fetch_repos(settings)
+    with timed(f"extract ({engine})"):
+        raw = extract_with_dlt(settings) if engine == "dlt" else fetch_repos(settings)
         save_raw(raw, as_of.date())
     if not raw:
-        # Zero repositories almost always means a broken configuration: fail,
-        # so GitHub Actions shows a red run instead of a silent empty day.
         raise RuntimeError("No repositories were extracted: check github.repos / orgs / users in the config.")
 
     with timed("transform"):
-        df = transform(raw, as_of, settings.active_max_days_since_push)
+        df = transform(raw, as_of, settings.active_max_days_since_push)  # identical for both engines
 
     if dry_run:
         logger.info("Dry run: the load step is skipped. First rows:\n%s", df.head(5))
         loaded = 0
     else:
-        with timed("load"):
-            loaded = load(df, settings.db_path, settings.load_mode)
+        with timed(f"load ({engine})"):
+            if engine == "dlt":
+                loaded = load_with_dlt(df, settings.db_path, settings.load_mode)
+            else:
+                loaded = load(df, settings.db_path, settings.load_mode)
 
     return RunSummary(
         as_of=as_of,
