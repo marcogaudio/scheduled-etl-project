@@ -1,0 +1,100 @@
+# Daily GitHub ETL: GitHub API -> Polars -> DuckDB, run automatically by GitHub Actions.
+# Docs: https://docs.github.com/actions
+
+name: Daily GitHub ETL
+
+on:
+  schedule:
+    # minute hour day-of-month month day-of-week, always in UTC.
+    # 06:17 UTC every day (07:17 in Rome in winter, 08:17 in summer).
+    # Minute 17 instead of 0: the top of the hour is GitHub's busiest moment.
+    - cron: "17 6 * * *"
+  workflow_dispatch: # adds a "Run workflow" button in the Actions tab
+    inputs:
+      mode:
+        description: "Load mode for this manual run"
+        type: choice
+        options: ["append", "overwrite"]
+        default: "append"
+      dry_run:
+        description: "Extract and transform only (don't write to the database)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read # the run's token may only read the repository
+
+concurrency:
+  group: daily-etl # never two runs at the same time...
+  cancel-in-progress: false # ...a second run waits instead of cancelling the first
+
+jobs:
+  etl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip # reuse downloaded packages between runs (keyed on requirements.txt)
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run the tests
+        run: pytest -q
+
+      - name: Restore the database from the previous run
+        uses: actions/cache/restore@v4
+        with:
+          path: data/output.duckdb
+          key: duckdb-${{ github.run_id }}-${{ github.run_attempt }} # never exists yet, so...
+          restore-keys: duckdb- # ...the newest cache whose key starts with "duckdb-" is used
+
+      - name: Run the ETL
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # created automatically for every run
+          # Optional overrides; empty values mean "use config.toml" (see src/config.py).
+          GITHUB_ETL_REPOS: ${{ vars.GITHUB_ETL_REPOS }}
+          GITHUB_ETL_LOAD_MODE: ${{ inputs.mode }}
+        run: python -m src.main --engine dlt ${{ inputs.dry_run && '--dry-run' || '' }}
+
+      - name: Save the updated database for the next run
+        if: ${{ !inputs.dry_run }}
+        uses: actions/cache/save@v4
+        with:
+          path: data/output.duckdb
+          key: duckdb-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload the database and today's raw JSON
+        if: ${{ !inputs.dry_run }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: github-etl-${{ github.run_number }}
+          path: |
+            data/output.duckdb
+            data/raw/
+          retention-days: 30
+
+      - name: Write a summary on the run page
+        if: ${{ !inputs.dry_run }}
+        continue-on-error: true # a summary problem must not turn a good run red
+        run: |
+          python - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          import duckdb
+          con = duckdb.connect("data/output.duckdb", read_only=True)
+          rows = con.execute(
+              "SELECT snapshot_date, count(*) FROM github.repo_snapshots "
+              "GROUP BY 1 ORDER BY 1 DESC LIMIT 7"
+          ).fetchall()
+          print("### Snapshots in the database (last 7 days)")
+          print("| snapshot_date | repos |")
+          print("|---|---|")
+          for day, repos in rows:
+              print(f"| {day} | {repos} |")
+          EOF
