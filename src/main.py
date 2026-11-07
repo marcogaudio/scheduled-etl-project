@@ -100,7 +100,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     Returns:
         A Namespace with one attribute per option: args.config, args.mode,
-        args.dry_run, args.log_level (dashes become underscores).
+        args.dry_run, args.log_level, args.engine (dashes become underscores).
     """
     parser = argparse.ArgumentParser(
         prog="python -m src.main",
@@ -122,6 +122,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--dry-run",
         action="store_true",  # a flag without a value: present = True
         help="Extract and transform, but do not write to the database.",
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=LOG_LEVELS,
+        default="INFO",
+        help="How much detail to log (default: INFO).",
     )
     parser.add_argument(
         "--engine",
